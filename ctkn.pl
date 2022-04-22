@@ -43,7 +43,7 @@ sub ctkn_new {
   $self->{"cur_loc"} = "";
 
   # Process options.
-  ($options =~ /^[dcC]*$/) || croak("Invalid option(s) in '$options' (valid options: d, c)");
+  ($options =~ /^[decC]*$/) || croak("Invalid option(s) in '$options' (valid options: d, e, c, C)");
 
   $self->{"esc_n"} = "\\n"; $self->{"esc_r"} = "\\r"; $self->{"esc_t"} = "\\t";
   if ($options =~ /c/) {
@@ -58,6 +58,11 @@ sub ctkn_new {
   $self->{"C_comments"} = 0;
   if ($options =~ /C/) {
     $self->{"C_comments"} = 1;
+  }
+
+  $self->{"tkn_comment"} = 0;
+  if ($options =~ /e/) {
+    $self->{"tkn_comment"} = 1;
   }
 
   return $self;
@@ -123,8 +128,11 @@ sub ctkn_input {
     my $cur_tok = $self->{"cur_tok"};
     my $state = $self->{"state"};
     if ($self->{"debug"}) {
+      # Get funct name (gv->NAME) from funct ref to get current fsm state.
       my $gv = svref_2object($state)->GV;
-      print STDERR "ctkn_input: " . $self->{"file_line"} . ":" . $self->{"column"} . ", c='$c', cur_tok='$cur_tok', state=" . $gv->NAME . "\n";
+      print STDERR "ctkn_input: " . $self->{"file_line"} . ":" .
+        $self->{"column"} .  ", c='$c', cur_tok='$cur_tok', state=" .
+        $gv->NAME . ", num_tokens=" . @{$self->{"tkn_val"}} . "\n";
     }
     &$state($self, $c);
   }
@@ -283,6 +291,9 @@ sub ctkn_fsm_comment {
   my ($self, $c) = @_;
 
   if ($c eq "") {  # EOF
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   elsif ($c =~ /^\\$/) {  # Backslash.
@@ -292,7 +303,8 @@ sub ctkn_fsm_comment {
     $self->{"state"} = \&ctkn_fsm_comment_ending;
   }
   else {
-    ;  # Still in comment, stay in ctkn_fsm_comment.
+    $self->{"cur_tok"} .= $c;  # accumulate comment text.
+    # Still in C comment.
   }
 }  # ctkn_fsm_comment
 
@@ -301,12 +313,23 @@ sub ctkn_fsm_comment_backslash {
   my ($self, $c) = @_;
 
   if ($c eq "") {  # EOF
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   elsif ($c =~ /^\\$/) {  # Double backslash.
+    $self->{"cur_tok"} .= '\\';  # No escaping outside of strings, accum backslash.
+    # Stay in ctkn_fsm_comment_backslash
+  }
+  elsif ($c =~ /^[ \t]$/) {  # Spaces after backslash is non-standard but ok.
+    ; # Stay in ctkn_fsm_comment_backslash
+  }
+  elsif ($c =~ /^\n$/s) {  # Continuation; ignore backslash.
     $self->{"state"} = \&ctkn_fsm_comment;
   }
   else {  # Ignore the backslash.
+    $self->{"cur_tok"} .= '\\';  # No escaping outside of strings, accum backslash.
     # Push the input char back on the string to re-process.
     $self->{"iline"} = $c . $self->{"iline"};
     $self->{"state"} = \&ctkn_fsm_comment;
@@ -318,15 +341,27 @@ sub ctkn_fsm_comment_ending {
   my ($self, $c) = @_;
 
   if ($c eq "") {  # EOF
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   elsif ($c =~ /^\\$/) {  # Backslash.
     $self->{"state"} = \&ctkn_fsm_comment_ending_backslash;
   }
+  elsif ($c =~ /^\*$/) {  # star
+    $self->{"cur_tok"} .= '*';  # accumulate comment text.
+    # Stay in ctkn_fsm_comment_ending
+  }
   elsif ($c =~ /^\/$/) {  # Found */, end of comment.
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   else {
+    $self->{"cur_tok"} .= '*';  # accumulate comment text.
+    $self->{"cur_tok"} .= $c;   # accumulate comment text.
     $self->{"state"} = \&ctkn_fsm_comment;  # Still in comment.
   }
 }  # ctkn_fsm_comment_ending
@@ -336,6 +371,9 @@ sub ctkn_fsm_comment_ending_backslash {
   my ($self, $c) = @_;
 
   if ($c eq "") {  # EOF
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   elsif ($c =~ /^[ \t]$/) {  # Spaces after backslash is non-standard but ok.
@@ -344,7 +382,14 @@ sub ctkn_fsm_comment_ending_backslash {
   elsif ($c =~ /^\n$/s) {  # Continuation; ignore backslash.
     $self->{"state"} = \&ctkn_fsm_comment_ending;
   }
+  elsif ($c =~ /^\\$/) {  # Double backslash.
+    $self->{"cur_tok"} .= '\\';  # No escaping outside of strings, accum backslash.
+    # Stay in comment_ending_backslash
+  }
   else {  # Ignore the star,backslash
+    $self->{"cur_tok"} .= '\\';  # No escaping outside of strings, accum backslash.
+    # Push the input char back on the string to re-process.
+    $self->{"iline"} = $c . $self->{"iline"};
     $self->{"state"} = \&ctkn_fsm_comment;
   }
 }  # ctkn_fsm_comment_ending_backslash
@@ -354,16 +399,23 @@ sub ctkn_fsm_cpp_comment {
   my ($self, $c) = @_;
 
   if ($c eq "") {  # EOF
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   elsif ($c =~ /^\\$/) {  # Backslash.
     $self->{"state"} = \&ctkn_fsm_cpp_comment_backslash;
   }
   elsif ($c =~ /^\n$/s) {  # End of line is end of comment.
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   else {
-    ;  # Still in C++ comment.
+    $self->{"cur_tok"} .= $c;  # accumulate comment text.
+    # Still in C++ comment.
   }
 }  # ctkn_fsm_cpp_comment
 
@@ -372,6 +424,9 @@ sub ctkn_fsm_cpp_comment_backslash {
   my ($self, $c) = @_;
 
   if ($c eq "") {  # EOF
+    if ($self->{"tkn_comment"}) {
+      ctkn_add($self, $self->{"cur_tok"}, "comment");
+    }
     $self->{"state"} = \&ctkn_fsm_idle;
   }
   elsif ($c =~ /^[ \t]$/) {  # Spaces after backslash is non-standard but ok.
@@ -380,7 +435,14 @@ sub ctkn_fsm_cpp_comment_backslash {
   elsif ($c =~ /^\n$/s) {  # Continuation; ignore backslash.
     $self->{"state"} = \&ctkn_fsm_cpp_comment;
   }
+  elsif ($c =~ /^\\$/) {  # Double backslash.
+    $self->{"cur_tok"} .= '\\';  # No escaping outside of strings, accum backslash.
+    # Stay in ctkn_fsm_comment_backslash
+  }
   else {  # Ignore backslash.
+    $self->{"cur_tok"} .= '\\';  # No escaping outside of strings, accum backslash.
+    # Push the input char back on the string to re-process.
+    $self->{"iline"} = $c . $self->{"iline"};
     $self->{"state"} = \&ctkn_fsm_cpp_comment;
   }
 }  # ctkn_fsm_cpp_comment_backslash
@@ -609,11 +671,11 @@ sub ctkn_fsm_single_quote_string_esc_backslash {  # double backslash
 }  # ctkn_fsm_single_quote_string_esc_backslash
 
 
-##################################################################################
-##################################################################################
+################################################################################
+################################################################################
 # Unit test code.
-##################################################################################
-##################################################################################
+################################################################################
+################################################################################
 
 
 sub ctkn_UT {
@@ -653,7 +715,7 @@ sub ctkn_UT {
   #=======================
 
   my $ctkn = ctkn_new($opts);
-  my $t = 0;
+  my $t = 0;  # keep track of "input" line
 
   ctkn_input($ctkn, "ABC X", $t++);
   $tkn_val = $ctkn->{"tkn_val"};
@@ -839,6 +901,35 @@ sub ctkn_UT {
   (scalar(@$tkn_val) == 34) || croak("FAIL");
   ($ctkn->{"tkn_val"}->[33] eq "ASDF") || croak("FAIL");
   ($ctkn->{"tkn_type"}->[33] eq "sqstring") || croak("FAIL");
+
+  print STDERR ctkn_dump($ctkn);
+
+  # Test comments token.
+
+  $ctkn = ctkn_new($opts . "e");
+  my $t = 0;  # keep track of "input" line
+
+  ctkn_input($ctkn, "ABC /* xyz */ X", $t++);
+  $tkn_val = $ctkn->{"tkn_val"};
+  (scalar(@$tkn_val) == 2) || croak("FAIL");
+  ($ctkn->{"tkn_val"}->[0] eq "ABC") || croak("FAIL");
+  ($ctkn->{"tkn_type"}->[0] eq "id") || croak("FAIL");
+  ($ctkn->{"tkn_val"}->[1] eq " xyz ") || croak("FAIL");
+  ($ctkn->{"tkn_type"}->[1] eq "comment") || croak("FAIL");
+
+  ctkn_input($ctkn, "/** ab\nc **/", $t++);
+  (scalar(@$tkn_val) == 4) || croak("FAIL");
+  ($ctkn->{"tkn_val"}->[2] eq "X") || croak("FAIL");
+  ($ctkn->{"tkn_type"}->[2] eq "id") || croak("FAIL");
+  ($ctkn->{"tkn_val"}->[3] eq "* ab\nc *") || croak("FAIL");
+  ($ctkn->{"tkn_type"}->[3] eq "comment") || croak("FAIL");
+
+  ctkn_input($ctkn, "//* AB\\ \nC **/", $t++);
+  (scalar(@$tkn_val) == 4) || croak("FAIL");
+  ctkn_eof($ctkn);
+  (scalar(@$tkn_val) == 5) || croak("FAIL");
+  ($ctkn->{"tkn_val"}->[4] eq "* ABC **/") || croak("FAIL");
+  ($ctkn->{"tkn_type"}->[4] eq "comment") || croak("FAIL");
 
   print STDERR ctkn_dump($ctkn);
 

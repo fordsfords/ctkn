@@ -29,6 +29,7 @@ Normal public API functions:
 #       c - convert \r, \n, and \t in strings to their control characters.
 #       C - Only recognize C comments /*...*/ (tokenize // comments).
 #       d - debug prints enabled.
+#       e - add 'comment' token; value is contents of comment.
 #     Returns: handle to parser instance.
 #
 #   ctkn_input(ctkn, input_line, loc_string) - feed the parser a line of text

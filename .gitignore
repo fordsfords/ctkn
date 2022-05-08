@@ -6,6 +6,11 @@
 *.o
 *.pm.tdy
 *.bs
+*.tmp
+tmp.*
+*.tmp[0-9]
+~*
+.DS_Store
 
 # Devel::Cover
 cover_db/
